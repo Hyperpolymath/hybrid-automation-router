@@ -4,9 +4,23 @@ defmodule HAR.DataPlane.Parsers.Terraform do
 
   Supports two input formats:
   - JSON: Output from `terraform show -json` or `terraform plan -json`
-  - HCL: Native Terraform configuration (basic pattern matching)
+  - HCL: Native Terraform configuration (enhanced pattern matching)
 
   Converts Terraform resources to HAR semantic graph operations.
+
+  ## HCL Support
+
+  Handles common HCL constructs:
+  - Resource blocks with nested blocks (ingress, egress, etc.)
+  - Data source blocks
+  - Module blocks with source references
+  - Variable and output blocks
+  - Locals blocks
+  - Provider blocks with aliases
+  - Meta-arguments: count, for_each, depends_on, lifecycle
+  - Dynamic blocks
+
+  For full HCL fidelity, prefer `terraform plan -json` output.
   """
 
   @behaviour HAR.DataPlane.Parser
@@ -62,48 +76,143 @@ defmodule HAR.DataPlane.Parsers.Terraform do
   end
 
   defp do_parse(content, :hcl) do
-    # Parse HCL using regex patterns
-    # This is a simplified parser for common Terraform patterns
+    # Enhanced HCL parser using recursive block extraction
     resources = parse_hcl_resources(content)
+    data_sources = parse_hcl_data_sources(content)
+    modules = parse_hcl_modules(content)
     variables = parse_hcl_variables(content)
     outputs = parse_hcl_outputs(content)
+    locals = parse_hcl_locals(content)
+    providers = parse_hcl_providers(content)
 
     {:ok,
      %{
        "format_version" => "1.0",
        "terraform_version" => "unknown",
-       "resources" => resources,
+       "resources" => resources ++ data_sources ++ modules,
        "variables" => variables,
-       "outputs" => outputs
+       "outputs" => outputs,
+       "locals" => locals,
+       "providers" => providers
      }}
+  end
+
+  # Enhanced block parser that handles nested blocks recursively
+  defp extract_block_body(content, start_pos) do
+    # Find matching closing brace, accounting for nested blocks
+    chars = String.graphemes(String.slice(content, start_pos..-1//1))
+    extract_balanced_block(chars, 0, [])
+  end
+
+  defp extract_balanced_block([], _depth, acc), do: Enum.join(Enum.reverse(acc))
+
+  defp extract_balanced_block(["{" | rest], depth, acc) do
+    extract_balanced_block(rest, depth + 1, ["{" | acc])
+  end
+
+  defp extract_balanced_block(["}" | _rest], 1, acc) do
+    # Found matching close brace
+    Enum.join(Enum.reverse(acc))
+  end
+
+  defp extract_balanced_block(["}" | rest], depth, acc) when depth > 1 do
+    extract_balanced_block(rest, depth - 1, ["}" | acc])
+  end
+
+  defp extract_balanced_block([char | rest], depth, acc) do
+    extract_balanced_block(rest, depth, [char | acc])
   end
 
   defp parse_hcl_resources(content) do
     # Match resource blocks: resource "type" "name" { ... }
-    resource_regex = ~r/resource\s+"([^"]+)"\s+"([^"]+)"\s*\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/s
+    # Use multi-pass: first find start positions, then extract full blocks
+    resource_starts = Regex.scan(~r/resource\s+"([^"]+)"\s+"([^"]+)"\s*\{/s, content, return: :index)
 
-    Regex.scan(resource_regex, content)
-    |> Enum.map(fn [_full, type, name, body] ->
+    resource_starts
+    |> Enum.map(fn [{start, len} | captures] ->
+      [{_, _}, {type_start, type_len}, {name_start, name_len}] = [{start, len} | captures]
+      type = String.slice(content, type_start, type_len)
+      name = String.slice(content, name_start, name_len)
+      body = extract_block_body(content, start + len)
+
       %{
         "address" => "#{type}.#{name}",
         "type" => type,
         "name" => name,
-        "values" => parse_hcl_attributes(body),
-        "depends_on" => extract_depends_on(body)
+        "values" => parse_hcl_block_body(body),
+        "depends_on" => extract_depends_on(body),
+        "count" => extract_count(body),
+        "for_each" => extract_for_each(body),
+        "lifecycle" => extract_lifecycle(body)
+      }
+    end)
+  end
+
+  defp parse_hcl_data_sources(content) do
+    # Match data blocks: data "type" "name" { ... }
+    data_starts = Regex.scan(~r/data\s+"([^"]+)"\s+"([^"]+)"\s*\{/s, content, return: :index)
+
+    data_starts
+    |> Enum.map(fn [{start, len} | captures] ->
+      [{_, _}, {type_start, type_len}, {name_start, name_len}] = [{start, len} | captures]
+      type = String.slice(content, type_start, type_len)
+      name = String.slice(content, name_start, name_len)
+      body = extract_block_body(content, start + len)
+
+      %{
+        "address" => "data.#{type}.#{name}",
+        "type" => "data.#{type}",
+        "name" => name,
+        "values" => parse_hcl_block_body(body),
+        "depends_on" => extract_depends_on(body),
+        "is_data_source" => true
+      }
+    end)
+  end
+
+  defp parse_hcl_modules(content) do
+    # Match module blocks: module "name" { source = "..." ... }
+    module_starts = Regex.scan(~r/module\s+"([^"]+)"\s*\{/s, content, return: :index)
+
+    module_starts
+    |> Enum.map(fn [{start, len} | captures] ->
+      [{_, _}, {name_start, name_len}] = [{start, len} | captures]
+      name = String.slice(content, name_start, name_len)
+      body = extract_block_body(content, start + len)
+      values = parse_hcl_block_body(body)
+
+      %{
+        "address" => "module.#{name}",
+        "type" => "module",
+        "name" => name,
+        "values" => values,
+        "source" => Map.get(values, "source"),
+        "version" => Map.get(values, "version"),
+        "depends_on" => extract_depends_on(body),
+        "for_each" => extract_for_each(body),
+        "count" => extract_count(body),
+        "is_module" => true
       }
     end)
   end
 
   defp parse_hcl_variables(content) do
     # Match variable blocks: variable "name" { ... }
-    variable_regex = ~r/variable\s+"([^"]+)"\s*\{([^}]*)\}/s
+    var_starts = Regex.scan(~r/variable\s+"([^"]+)"\s*\{/s, content, return: :index)
 
-    Regex.scan(variable_regex, content)
-    |> Enum.map(fn [_full, name, body] ->
+    var_starts
+    |> Enum.map(fn [{start, len} | captures] ->
+      [{_, _}, {name_start, name_len}] = [{start, len} | captures]
+      name = String.slice(content, name_start, name_len)
+      body = extract_block_body(content, start + len)
+
       %{
         "name" => name,
         "default" => extract_default(body),
-        "type" => extract_type(body)
+        "type" => extract_type(body),
+        "description" => extract_description(body),
+        "sensitive" => extract_sensitive(body),
+        "validation" => extract_validation(body)
       }
     end)
     |> Map.new(fn v -> {v["name"], v} end)
@@ -111,35 +220,297 @@ defmodule HAR.DataPlane.Parsers.Terraform do
 
   defp parse_hcl_outputs(content) do
     # Match output blocks: output "name" { value = ... }
-    output_regex = ~r/output\s+"([^"]+)"\s*\{([^}]*)\}/s
+    output_starts = Regex.scan(~r/output\s+"([^"]+)"\s*\{/s, content, return: :index)
 
-    Regex.scan(output_regex, content)
-    |> Enum.map(fn [_full, name, body] ->
+    output_starts
+    |> Enum.map(fn [{start, len} | captures] ->
+      [{_, _}, {name_start, name_len}] = [{start, len} | captures]
+      name = String.slice(content, name_start, name_len)
+      body = extract_block_body(content, start + len)
+
       %{
         "name" => name,
-        "value" => extract_value(body)
+        "value" => extract_value(body),
+        "description" => extract_description(body),
+        "sensitive" => extract_sensitive(body)
       }
     end)
     |> Map.new(fn o -> {o["name"], o} end)
   end
 
-  defp parse_hcl_attributes(body) do
-    # Parse key = value pairs from HCL block body
-    attr_regex = ~r/(\w+)\s*=\s*(?:"([^"]*)"|(true|false|\d+)|(\w+\.\w+(?:\.\w+)*))/
+  defp parse_hcl_locals(content) do
+    # Match locals blocks: locals { ... }
+    locals_starts = Regex.scan(~r/locals\s*\{/s, content, return: :index)
 
-    Regex.scan(attr_regex, body)
-    |> Enum.map(fn
-      [_full, key, string_val, "", ""] when string_val != "" -> {key, string_val}
-      [_full, key, "", literal_val, ""] when literal_val != "" -> {key, parse_literal(literal_val)}
-      [_full, key, "", "", ref] when ref != "" -> {key, "${#{ref}}"}
-      [_full, key | _] -> {key, nil}
+    locals_starts
+    |> Enum.flat_map(fn [{start, len} | _] ->
+      body = extract_block_body(content, start + len)
+      parse_hcl_simple_attributes(body)
     end)
     |> Map.new()
   end
 
+  defp parse_hcl_providers(content) do
+    # Match provider blocks: provider "name" { ... } or provider "name" { alias = "..." }
+    provider_starts = Regex.scan(~r/provider\s+"([^"]+)"\s*\{/s, content, return: :index)
+
+    provider_starts
+    |> Enum.map(fn [{start, len} | captures] ->
+      [{_, _}, {name_start, name_len}] = [{start, len} | captures]
+      name = String.slice(content, name_start, name_len)
+      body = extract_block_body(content, start + len)
+      values = parse_hcl_block_body(body)
+      alias_name = Map.get(values, "alias")
+
+      key =
+        if alias_name do
+          "#{name}.#{alias_name}"
+        else
+          name
+        end
+
+      {key,
+       %{
+         "name" => name,
+         "alias" => alias_name,
+         "values" => values
+       }}
+    end)
+    |> Map.new()
+  end
+
+  # Enhanced block body parser that handles nested blocks
+  defp parse_hcl_block_body(body) do
+    # First, extract nested blocks
+    nested_blocks = extract_nested_blocks(body)
+
+    # Then extract simple attributes (excluding block content)
+    attrs = parse_hcl_simple_attributes(body)
+
+    # Merge nested blocks into attributes
+    Map.merge(attrs, nested_blocks)
+  end
+
+  defp parse_hcl_simple_attributes(body) do
+    # Parse key = value pairs, handling various formats
+    # Avoid matching inside nested blocks by using a simplified approach
+
+    lines = String.split(body, "\n")
+
+    lines
+    |> Enum.reduce({%{}, 0}, fn line, {acc, brace_depth} ->
+      trimmed = String.trim(line)
+
+      # Track brace depth to skip nested block content
+      opens = String.graphemes(line) |> Enum.count(&(&1 == "{"))
+      closes = String.graphemes(line) |> Enum.count(&(&1 == "}"))
+      new_depth = brace_depth + opens - closes
+
+      if brace_depth == 0 and not is_block_declaration?(trimmed) do
+        case parse_attribute_line(trimmed) do
+          {:ok, key, value} -> {Map.put(acc, key, value), new_depth}
+          :skip -> {acc, new_depth}
+        end
+      else
+        {acc, new_depth}
+      end
+    end)
+    |> elem(0)
+  end
+
+  defp is_block_declaration?(line) do
+    # Check if line starts a nested block
+    String.match?(line, ~r/^\s*\w+\s*\{/) or
+      String.match?(line, ~r/^\s*\w+\s+"[^"]*"\s*\{/) or
+      String.match?(line, ~r/^\s*dynamic\s+"[^"]*"\s*\{/)
+  end
+
+  defp parse_attribute_line(line) do
+    cond do
+      # String value: key = "value"
+      match = Regex.run(~r/^(\w+)\s*=\s*"(.*)"$/, line) ->
+        [_, key, value] = match
+        {:ok, key, value}
+
+      # Heredoc: key = <<EOF ... EOF
+      String.match?(line, ~r/^(\w+)\s*=\s*<</) ->
+        :skip
+
+      # List value: key = [...]
+      match = Regex.run(~r/^(\w+)\s*=\s*\[(.+)\]$/, line) ->
+        [_, key, list_content] = match
+        {:ok, key, parse_list_value(list_content)}
+
+      # Boolean/number: key = true/false/123
+      match = Regex.run(~r/^(\w+)\s*=\s*(true|false|\d+(?:\.\d+)?)$/, line) ->
+        [_, key, value] = match
+        {:ok, key, parse_literal(value)}
+
+      # Reference: key = var.name or local.name or resource.name
+      match = Regex.run(~r/^(\w+)\s*=\s*(\w+(?:\.\w+)+)$/, line) ->
+        [_, key, ref] = match
+        {:ok, key, "${#{ref}}"}
+
+      # Function call: key = func(...)
+      match = Regex.run(~r/^(\w+)\s*=\s*(\w+\(.+\))$/, line) ->
+        [_, key, expr] = match
+        {:ok, key, expr}
+
+      # Empty or comment line
+      true ->
+        :skip
+    end
+  end
+
+  defp parse_list_value(content) do
+    # Parse list items: "a", "b" or var.x, var.y
+    ~r/"([^"]*)"|(\w+(?:\.\w+)+)/
+    |> Regex.scan(content)
+    |> Enum.map(fn
+      [_, str, ""] -> str
+      [_, "", ref] -> "${#{ref}}"
+    end)
+  end
+
+  defp extract_nested_blocks(body) do
+    # Extract named blocks like: ingress { ... }, egress { ... }, lifecycle { ... }
+    block_regex = ~r/(\w+)\s*\{/s
+
+    # Find all potential nested blocks
+    Regex.scan(block_regex, body, return: :index)
+    |> Enum.reduce(%{}, fn [{_start, _len} | captures], acc ->
+      [{name_start, name_len}] = captures
+      block_name = String.slice(body, name_start, name_len)
+
+      # Skip meta-arguments handled separately
+      if block_name in ~w(lifecycle dynamic) do
+        acc
+      else
+        # Find opening brace position
+        after_name = String.slice(body, (name_start + name_len)..-1//1)
+
+        case Regex.run(~r/^\s*\{/, after_name, return: :index) do
+          [{brace_offset, _}] ->
+            block_start = name_start + name_len + brace_offset + 1
+            block_body = extract_block_body(body, block_start)
+
+            # Group repeated blocks (like multiple ingress rules)
+            existing = Map.get(acc, block_name, [])
+            parsed_block = parse_hcl_simple_attributes(block_body)
+            Map.put(acc, block_name, existing ++ [parsed_block])
+
+          nil ->
+            acc
+        end
+      end
+    end)
+  end
+
   defp parse_literal("true"), do: true
   defp parse_literal("false"), do: false
-  defp parse_literal(num), do: String.to_integer(num)
+
+  defp parse_literal(num) do
+    if String.contains?(num, ".") do
+      String.to_float(num)
+    else
+      String.to_integer(num)
+    end
+  rescue
+    ArgumentError -> num
+  end
+
+  # Meta-argument extractors
+
+  defp extract_count(body) do
+    case Regex.run(~r/count\s*=\s*(.+)/, body) do
+      [_, expr] -> String.trim(expr)
+      nil -> nil
+    end
+  end
+
+  defp extract_for_each(body) do
+    case Regex.run(~r/for_each\s*=\s*(.+)/, body) do
+      [_, expr] -> String.trim(expr)
+      nil -> nil
+    end
+  end
+
+  defp extract_lifecycle(body) do
+    # Extract lifecycle block content
+    case Regex.run(~r/lifecycle\s*\{([^}]+)\}/s, body) do
+      [_, lifecycle_body] ->
+        %{
+          "create_before_destroy" => extract_bool(lifecycle_body, "create_before_destroy"),
+          "prevent_destroy" => extract_bool(lifecycle_body, "prevent_destroy"),
+          "ignore_changes" => extract_ignore_changes(lifecycle_body)
+        }
+
+      nil ->
+        nil
+    end
+  end
+
+  defp extract_bool(body, attr) do
+    case Regex.run(~r/#{attr}\s*=\s*(true|false)/, body) do
+      [_, "true"] -> true
+      [_, "false"] -> false
+      nil -> nil
+    end
+  end
+
+  defp extract_ignore_changes(body) do
+    case Regex.run(~r/ignore_changes\s*=\s*\[([^\]]*)\]/, body) do
+      [_, changes] ->
+        ~r/(\w+)/
+        |> Regex.scan(changes)
+        |> Enum.map(fn [_, attr] -> attr end)
+
+      nil ->
+        nil
+    end
+  end
+
+  defp extract_description(body) do
+    case Regex.run(~r/description\s*=\s*"([^"]*)"/, body) do
+      [_, desc] -> desc
+      nil -> nil
+    end
+  end
+
+  defp extract_sensitive(body) do
+    case Regex.run(~r/sensitive\s*=\s*(true|false)/, body) do
+      [_, "true"] -> true
+      [_, "false"] -> false
+      nil -> false
+    end
+  end
+
+  defp extract_validation(body) do
+    case Regex.run(~r/validation\s*\{([^}]+)\}/s, body) do
+      [_, validation_body] ->
+        %{
+          "condition" => extract_value_from_body(validation_body, "condition"),
+          "error_message" => extract_string_value(validation_body, "error_message")
+        }
+
+      nil ->
+        nil
+    end
+  end
+
+  defp extract_value_from_body(body, key) do
+    case Regex.run(~r/#{key}\s*=\s*(.+)/, body) do
+      [_, value] -> String.trim(value)
+      nil -> nil
+    end
+  end
+
+  defp extract_string_value(body, key) do
+    case Regex.run(~r/#{key}\s*=\s*"([^"]*)"/, body) do
+      [_, value] -> value
+      nil -> nil
+    end
+  end
 
   defp extract_depends_on(body) do
     depends_regex = ~r/depends_on\s*=\s*\[([^\]]*)\]/s
