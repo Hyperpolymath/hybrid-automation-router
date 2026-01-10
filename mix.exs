@@ -132,7 +132,8 @@ defmodule HAR.MixProject do
         "docs/FINAL_ARCHITECTURE.md": [title: "Architecture"],
         "docs/CONTROL_PLANE_ARCHITECTURE.md": [title: "Control Plane"],
         "docs/HAR_SECURITY.md": [title: "Security Model"],
-        "docs/IOT_IIOT_ARCHITECTURE.md": [title: "IoT/IIoT Integration"]
+        "docs/IOT_IIOT_ARCHITECTURE.md": [title: "IoT/IIoT Integration"],
+        "docs/V2_IOT_ROADMAP.md": [title: "v2 IoT Roadmap"]
       ],
       groups_for_modules: [
         "Semantic Graph": [
