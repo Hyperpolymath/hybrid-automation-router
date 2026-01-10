@@ -71,6 +71,10 @@ defmodule HAR.DataPlane.Transformer do
     HAR.DataPlane.Transformers.CloudFormation.transform(graph, opts)
   end
 
+  defp do_transform(:pulumi, graph, opts) do
+    HAR.DataPlane.Transformers.Pulumi.transform(graph, opts)
+  end
+
   defp do_transform(target, _graph, _opts) do
     {:error, {:unsupported_target, target}}
   end
