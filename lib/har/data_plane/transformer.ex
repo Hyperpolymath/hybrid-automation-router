@@ -67,6 +67,10 @@ defmodule HAR.DataPlane.Transformer do
     HAR.DataPlane.Transformers.DockerCompose.transform(graph, opts)
   end
 
+  defp do_transform(:cloudformation, graph, opts) do
+    HAR.DataPlane.Transformers.CloudFormation.transform(graph, opts)
+  end
+
   defp do_transform(target, _graph, _opts) do
     {:error, {:unsupported_target, target}}
   end
