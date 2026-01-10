@@ -1,17 +1,24 @@
 defmodule HAR.MixProject do
   use Mix.Project
 
+  @version "1.0.0-rc1"
+  @source_url "https://github.com/hyperpolymath/hybrid-automation-router"
+
   def project do
     [
       app: :har,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       dialyzer: dialyzer(),
       test_coverage: [tool: ExCoveralls],
       description: description(),
-      package: package()
+      package: package(),
+      docs: docs(),
+      name: "HAR",
+      source_url: @source_url,
+      homepage_url: @source_url
     ]
   end
 
@@ -80,18 +87,79 @@ defmodule HAR.MixProject do
   defp description do
     """
     HAR (Hybrid Automation Router) - Infrastructure automation router that parses
-    configs from any IaC tool and routes/transforms them to any target format.
-    Think BGP for infrastructure automation.
+    configs from any IaC tool (Ansible, Salt, Terraform) and routes/transforms them
+    to any target format. Think BGP for infrastructure automation.
     """
   end
 
   defp package do
     [
       name: "har",
-      licenses: ["MIT"],
+      licenses: ["MPL-2.0"],
+      maintainers: ["hyperpolymath"],
       links: %{
-        "GitHub" => "https://github.com/yourusername/hybrid-automation-router"
-      }
+        "GitHub" => @source_url,
+        "Documentation" => "https://hexdocs.pm/har"
+      },
+      files: ~w(
+        lib priv config
+        mix.exs README.md LICENSE CHANGELOG.adoc
+        .formatter.exs
+      )
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      name: "HAR",
+      source_ref: "v#{@version}",
+      canonical: "https://hexdocs.pm/har",
+      source_url: @source_url,
+      extras: [
+        "README.md": [title: "Overview"],
+        "CHANGELOG.adoc": [title: "Changelog"],
+        "docs/FINAL_ARCHITECTURE.md": [title: "Architecture"],
+        "docs/CONTROL_PLANE_ARCHITECTURE.md": [title: "Control Plane"],
+        "docs/HAR_SECURITY.md": [title: "Security Model"],
+        "docs/IOT_IIOT_ARCHITECTURE.md": [title: "IoT/IIoT Integration"]
+      ],
+      groups_for_modules: [
+        "Semantic Graph": [
+          HAR.Semantic.Graph,
+          HAR.Semantic.Operation,
+          HAR.Semantic.Dependency
+        ],
+        "Control Plane": [
+          HAR.ControlPlane.Router,
+          HAR.ControlPlane.RoutingTable,
+          HAR.ControlPlane.RoutingPlan,
+          HAR.ControlPlane.RoutingDecision,
+          HAR.ControlPlane.HealthChecker,
+          HAR.ControlPlane.PolicyEngine
+        ],
+        "Data Plane - Parsers": [
+          HAR.DataPlane.Parser,
+          HAR.DataPlane.Parsers.Ansible,
+          HAR.DataPlane.Parsers.Salt,
+          HAR.DataPlane.Parsers.Terraform
+        ],
+        "Data Plane - Transformers": [
+          HAR.DataPlane.Transformer,
+          HAR.DataPlane.Transformers.Ansible,
+          HAR.DataPlane.Transformers.Salt,
+          HAR.DataPlane.Transformers.Terraform
+        ],
+        "Utilities": [
+          HAR.YamlFormatter
+        ]
+      ],
+      nest_modules_by_prefix: [
+        HAR.Semantic,
+        HAR.ControlPlane,
+        HAR.DataPlane.Parsers,
+        HAR.DataPlane.Transformers
+      ]
     ]
   end
 end
